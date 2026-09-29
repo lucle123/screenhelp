@@ -2,7 +2,6 @@ package com.example.screenhelpai
 
 import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
@@ -37,26 +36,24 @@ class MainActivity : AppCompatActivity() {
     private var requestingCapture = false
     private var openedSettingsForOverlay = false
     private var captureReady = false
+    private var screenHelpRunning = false
+    private var captureData: Intent? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
-        // First launch: overlay settings first, then notification, then screen capture.
+        // Opening or returning to the app never requests permissions automatically.
+        // The user must tap the corresponding status item to request each permission.
+        // MediaProjection (Entire screen) is intentionally never requested here.
         refreshStatus()
-        if (!Settings.canDrawOverlays(this)) {
-            openOverlaySettings()
-        } else {
-            requestNotificationsOrCapture()
-        }
     }
 
     override fun onResume() {
         super.onResume()
+        // Returning to the app only refreshes the status indicators.
+        // Never pop an Android permission/settings dialog automatically.
         refreshStatus()
-        if (openedSettingsForOverlay) {
-            openedSettingsForOverlay = false
-            if (Settings.canDrawOverlays(this) && !captureReady) requestNotificationsOrCapture()
-        }
+        openedSettingsForOverlay = false
     }
 
     private fun buildUi() {
@@ -77,7 +74,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         }
         overallStatus = TextView(this).apply {
-            text = "● CHƯA SẴN SÀNG"
+            text = "Status: ●"
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.rgb(255, 183, 77))
@@ -117,6 +114,13 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(save, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(12) })
 
+        val start = Button(this).apply {
+            text = "START SCREEN HELP"
+            setTextColor(Color.WHITE)
+            setOnClickListener { startScreenHelp() }
+        }
+        root.addView(start, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(8) })
+
         val statusTitle = TextView(this).apply {
             text = "SYSTEM STATUS"
             textSize = 12f
@@ -130,6 +134,7 @@ class MainActivity : AppCompatActivity() {
         overlayStatus = addStatusRow(root, "Appear on top")
         captureStatus = addStatusRow(root, "Entire screen")
         notifyStatus = addStatusRow(root, "Notifications")
+
 
         val note = TextView(this).apply {
             text = "Bấm STATUS ở góc trên phải để xem chi tiết. Giữ bong bóng HELP 7 giây để chuyển sang X và tắt Screen Help."
@@ -160,6 +165,14 @@ class MainActivity : AppCompatActivity() {
         }
         row.addView(name)
         row.addView(state)
+        row.setOnClickListener {
+            when (label) {
+                "Gemini API key" -> keyInput.requestFocus()
+                "Appear on top" -> openOverlaySettings()
+                "Entire screen" -> requestCapture()
+                "Notifications" -> requestNotifications()
+            }
+        }
         root.addView(row, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(5) })
         return state
     }
@@ -184,9 +197,10 @@ class MainActivity : AppCompatActivity() {
         setState(captureStatus, captureReady)
         setState(notifyStatus, notifyOk)
         val ready = keyOk && overlayOk && captureReady && notifyOk
-        overallStatus.text = if (ready) "● SẴN SÀNG" else "● CHƯA SẴN SÀNG"
+        overallStatus.text = "Status: ●"
         overallStatus.setTextColor(if (ready) Color.rgb(72, 220, 145) else Color.rgb(255, 183, 77))
-        if (ready) startOverlay()
+        // Do not start the overlay just because all permissions are ready.
+        // The user explicitly starts Screen Help with the START button.
     }
 
     private fun setState(view: TextView, ok: Boolean) {
@@ -202,18 +216,16 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this).setTitle("Screen Help status").setMessage(text).setPositiveButton("OK", null).show()
     }
 
-    private fun requestNotificationsOrCapture() {
+    private fun requestNotifications() {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY)
-        } else {
-            requestCapture()
         }
+        refreshStatus()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_NOTIFY) requestCapture()
-        refreshStatus()
+        if (requestCode == REQ_NOTIFY) refreshStatus()
     }
 
     private fun openOverlaySettings() {
@@ -223,7 +235,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestCapture() {
         if (requestingCapture || captureReady) return
-        if (!Settings.canDrawOverlays(this)) return
+        if (!Settings.canDrawOverlays(this)) {
+            openOverlaySettings()
+            return
+        }
         requestingCapture = true
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
@@ -240,20 +255,53 @@ class MainActivity : AppCompatActivity() {
             return
         }
         captureReady = true
-        // Keep the granted projection token in the long-lived overlay service for
-        // the duration of this Screen Help session. No new consent dialog per HELP tap.
-        ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java).apply {
-            action = OverlayService.ACTION_SET_CAPTURE
-            putExtra("data", data)
-        })
+        captureData = data
+        // Keep the projection token in this running app session. Do not start the
+        // background overlay service until the user explicitly presses START.
         refreshStatus()
     }
 
     private fun startOverlay() {
-        if (!Settings.canDrawOverlays(this) || !captureReady) return
+        if (!screenHelpRunning || !Settings.canDrawOverlays(this) || !captureReady) return
         ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java).apply {
             action = OverlayService.ACTION_SHOW
         })
+    }
+
+    private fun startScreenHelp() {
+        val keyOk = getSharedPreferences(PREFS, MODE_PRIVATE)
+            .getString(KEY_API, "").orEmpty().isNotBlank()
+        val overlayOk = Settings.canDrawOverlays(this)
+        val notifyOk = Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+
+        if (!keyOk) {
+            keyInput.error = "Nhập Gemini API key trước"
+            keyInput.requestFocus()
+            return
+        }
+        if (!overlayOk) {
+            openOverlaySettings()
+            return
+        }
+        if (!notifyOk) {
+            requestNotifications()
+            return
+        }
+        if (!captureReady) {
+            Toast.makeText(this, "Hãy cấp quyền Entire screen trước.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        screenHelpRunning = true
+        ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java).apply {
+            action = OverlayService.ACTION_SET_CAPTURE
+            putExtra("data", captureData)
+        })
+        startOverlay()
+        Toast.makeText(this, "Screen Help đang chạy", Toast.LENGTH_SHORT).show()
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

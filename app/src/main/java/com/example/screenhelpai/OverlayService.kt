@@ -48,11 +48,10 @@ class OverlayService : Service() {
             ACTION_SHOW -> showBubble()
             ACTION_SET_CAPTURE -> {
                 captureData = getIntentExtra(intent, "data")
-                showBubble()
             }
             ACTION_CAPTURE -> requestCapture()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun requestCapture() {
