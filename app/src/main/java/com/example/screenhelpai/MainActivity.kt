@@ -8,9 +8,12 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
 import android.provider.Settings
 import android.text.InputType
+import android.graphics.Color
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -25,106 +28,202 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var keyInput: EditText
-    private var captureRequested = false
+    private lateinit var overallStatus: TextView
+    private lateinit var apiStatus: TextView
+    private lateinit var overlayStatus: TextView
+    private lateinit var captureStatus: TextView
+    private lateinit var notifyStatus: TextView
+    private var requestingCapture = false
+    private var openedSettingsForOverlay = false
+    private var captureReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
-        if (intent.getBooleanExtra("REQUEST_CAPTURE", false)) {
-            captureRequested = true
-            requestCapture()
+        // First launch: overlay settings first, then notification, then screen capture.
+        refreshStatus()
+        if (!Settings.canDrawOverlays(this)) {
+            openOverlaySettings()
+        } else {
+            requestNotificationsOrCapture()
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        if (intent.getBooleanExtra("REQUEST_CAPTURE", false)) {
-            captureRequested = true
-            requestCapture()
+    override fun onResume() {
+        super.onResume()
+        refreshStatus()
+        if (openedSettingsForOverlay) {
+            openedSettingsForOverlay = false
+            if (Settings.canDrawOverlays(this) && !captureReady) requestNotificationsOrCapture()
         }
     }
 
     private fun buildUi() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 40, 32, 32)
+            setPadding(dp(22), dp(18), dp(22), dp(24))
+            setBackgroundColor(Color.rgb(9, 14, 22))
         }
 
+        val top = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+        }
         val title = TextView(this).apply {
-            text = "Screen Help AI"
-            textSize = 28f
+            text = "✦  Screen Help"
+            textSize = 24f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         }
+        overallStatus = TextView(this).apply {
+            text = "● CHƯA SẴN SÀNG"
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(255, 183, 77))
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setBackgroundColor(Color.rgb(27, 35, 48))
+            setOnClickListener { showStatusDialog() }
+        }
+        top.addView(title)
+        top.addView(overallStatus)
+        root.addView(top)
 
-        val info = TextView(this).apply {
-            text = "Nhập Gemini API key một lần. Sau đó bật Help bubble. Khi bấm HELP, bubble sẽ tự ẩn trước khi chụp màn hình, rồi Gemini giải bài theo từng bước."
-            textSize = 16f
-            setPadding(0, 16, 0, 20)
+        val subtitle = TextView(this).apply {
+            text = "AI assistant for anything on your screen"
+            textSize = 14f
+            setTextColor(Color.rgb(150, 165, 184))
+            setPadding(0, dp(8), 0, dp(22))
         }
+        root.addView(subtitle)
 
         keyInput = EditText(this).apply {
             hint = "Gemini API key"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.rgb(110, 125, 145))
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setBackgroundColor(Color.rgb(21, 29, 40))
             setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, ""))
         }
+        root.addView(keyInput, LinearLayout.LayoutParams(-1, dp(52)))
 
-        val start = Button(this).apply {
-            text = "Lưu key + Bật Help"
-            setOnClickListener { saveAndEnable() }
+        val save = Button(this).apply {
+            text = "SAVE API KEY"
+            setTextColor(Color.WHITE)
+            setOnClickListener { saveKey() }
         }
+        root.addView(save, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(12) })
 
-        val stop = Button(this).apply {
-            text = "Tắt Help bubble"
-            setOnClickListener {
-                stopService(Intent(this@MainActivity, OverlayService::class.java))
-                Toast.makeText(this@MainActivity, "Đã tắt Help bubble", Toast.LENGTH_SHORT).show()
-            }
+        val statusTitle = TextView(this).apply {
+            text = "SYSTEM STATUS"
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(120, 145, 170))
+            setPadding(0, dp(24), 0, dp(8))
         }
+        root.addView(statusTitle)
 
-        root.addView(title)
-        root.addView(info)
-        root.addView(keyInput)
-        root.addView(start)
-        root.addView(stop)
+        apiStatus = addStatusRow(root, "Gemini API key")
+        overlayStatus = addStatusRow(root, "Appear on top")
+        captureStatus = addStatusRow(root, "Entire screen")
+        notifyStatus = addStatusRow(root, "Notifications")
+
+        val note = TextView(this).apply {
+            text = "Bấm STATUS ở góc trên phải để xem chi tiết. Giữ bong bóng HELP 7 giây để chuyển sang X và tắt Screen Help."
+            textSize = 12f
+            setTextColor(Color.rgb(115, 130, 150))
+            setPadding(0, dp(18), 0, 0)
+        }
+        root.addView(note)
+
         setContentView(root)
-        requestNotifications()
     }
 
-    private fun saveAndEnable() {
+    private fun addStatusRow(root: LinearLayout, label: String): TextView {
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setBackgroundColor(Color.rgb(16, 23, 33))
+        }
+        val name = TextView(this).apply {
+            text = label
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        val state = TextView(this).apply {
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        row.addView(name)
+        row.addView(state)
+        root.addView(row, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(5) })
+        return state
+    }
+
+    private fun saveKey() {
         val key = keyInput.text.toString().trim()
         if (key.isBlank()) {
             keyInput.error = "Nhập Gemini API key"
             return
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_API, key).apply()
-        enableOverlay()
+        refreshStatus()
+        Toast.makeText(this, "Đã lưu API key", Toast.LENGTH_SHORT).show()
     }
 
-    private fun requestNotifications() {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+    private fun refreshStatus() {
+        val keyOk = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, "").orEmpty().isNotBlank()
+        val overlayOk = Settings.canDrawOverlays(this)
+        val notifyOk = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        setState(apiStatus, keyOk)
+        setState(overlayStatus, overlayOk)
+        setState(captureStatus, captureReady)
+        setState(notifyStatus, notifyOk)
+        val ready = keyOk && overlayOk && captureReady && notifyOk
+        overallStatus.text = if (ready) "● SẴN SÀNG" else "● CHƯA SẴN SÀNG"
+        overallStatus.setTextColor(if (ready) Color.rgb(72, 220, 145) else Color.rgb(255, 183, 77))
+        if (ready) startOverlay()
+    }
+
+    private fun setState(view: TextView, ok: Boolean) {
+        view.text = if (ok) "READY" else "REQUIRED"
+        view.setTextColor(if (ok) Color.rgb(72, 220, 145) else Color.rgb(255, 183, 77))
+    }
+
+    private fun showStatusDialog() {
+        val keyOk = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, "").orEmpty().isNotBlank()
+        val overlayOk = Settings.canDrawOverlays(this)
+        val notifyOk = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        val text = "Gemini API key: ${if (keyOk) "✓" else "✗"}\nAppear on top: ${if (overlayOk) "✓" else "✗"}\nEntire screen: ${if (captureReady) "✓" else "✗"}\nNotifications: ${if (notifyOk) "✓" else "✗"}\n\nScreen Help chỉ chạy khi các mục cần thiết đã READY."
+        AlertDialog.Builder(this).setTitle("Screen Help status").setMessage(text).setPositiveButton("OK", null).show()
+    }
+
+    private fun requestNotificationsOrCapture() {
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY)
+        } else {
+            requestCapture()
         }
     }
 
-    private fun enableOverlay() {
-        if (!Settings.canDrawOverlays(this)) {
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-            Toast.makeText(this, "Bật quyền hiển thị trên ứng dụng khác, rồi quay lại.", Toast.LENGTH_LONG).show()
-            return
-        }
-        ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java))
-        Toast.makeText(this, "Help bubble đã bật", Toast.LENGTH_SHORT).show()
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NOTIFY) requestCapture()
+        refreshStatus()
+    }
+
+    private fun openOverlaySettings() {
+        openedSettingsForOverlay = true
+        startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
     }
 
     private fun requestCapture() {
-        val key = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, "").orEmpty()
-        if (key.isBlank()) {
-            captureRequested = false
-            Toast.makeText(this, "Hãy nhập Gemini API key trước.", Toast.LENGTH_LONG).show()
-            return
-        }
+        if (requestingCapture || captureReady) return
+        if (!Settings.canDrawOverlays(this)) return
+        requestingCapture = true
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE)
     }
@@ -133,27 +232,28 @@ class MainActivity : AppCompatActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQ_CAPTURE) return
-        captureRequested = false
-
+        requestingCapture = false
         if (resultCode != Activity.RESULT_OK || data == null) {
-            // Restore the bubble if the user cancelled screen capture.
-            ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java).apply {
-                action = OverlayService.ACTION_SHOW
-            })
-            Toast.makeText(this, "Đã hủy chụp màn hình", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Cần cho phép Entire screen để Screen Help hoạt động.", Toast.LENGTH_LONG).show()
+            refreshStatus()
             return
         }
-
-        val key = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, "").orEmpty()
-        val serviceIntent = Intent(this, CaptureService::class.java).apply {
-            putExtra("resultCode", resultCode)
+        captureReady = true
+        // Keep the granted projection token in the long-lived overlay service for
+        // the duration of this Screen Help session. No new consent dialog per HELP tap.
+        ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java).apply {
+            action = OverlayService.ACTION_SET_CAPTURE
             putExtra("data", data)
-            putExtra("apiKey", key)
-        }
-        // Move the Activity away first so the captured frame cannot contain this UI.
-        moveTaskToBack(true)
-        Handler(mainLooper).postDelayed({
-            ContextCompat.startForegroundService(this, serviceIntent)
-        }, 350)
+        })
+        refreshStatus()
     }
+
+    private fun startOverlay() {
+        if (!Settings.canDrawOverlays(this) || !captureReady) return
+        ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java).apply {
+            action = OverlayService.ACTION_SHOW
+        })
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }
