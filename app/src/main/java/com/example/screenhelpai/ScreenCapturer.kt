@@ -76,7 +76,7 @@ class ScreenCapturer(
     /** Grabs one clean frame. Heavy work runs off the main thread. */
     suspend fun capture(): Bitmap = lock.withLock {
         withContext(Dispatchers.Default) {
-            check(!released) { "Capturer đã đóng." }
+            check(!released) { "Capturer has been released." }
             val (w, h, dpi) = screenSize()
 
             val frame = CompletableDeferred<Unit>()
@@ -85,7 +85,7 @@ class ScreenCapturer(
             try {
                 withTimeoutOrNull(FRAME_TIMEOUT_MS) { frame.await() }
                 val image = currentReader.acquireLatestImage()
-                    ?: throw IllegalStateException("Không chụp được màn hình. Hãy thử lại.")
+                    ?: throw IllegalStateException("Could not capture the screen. Please try again.")
                 try {
                     imageToBitmap(image)
                 } finally {

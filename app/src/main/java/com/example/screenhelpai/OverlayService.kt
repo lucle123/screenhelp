@@ -54,7 +54,7 @@ class OverlayService : Service() {
         private const val RESULT_NOTIFICATION_ID = 21
 
         private const val BUBBLE_SIZE_DP = 56
-        private const val EXIT_HOLD_MS = 7_000L
+        private const val EXIT_HOLD_MS = 4_000L
         private const val HIDE_SETTLE_MS = 100L
 
         /** True while a screen-capture session is alive. MainActivity reads this for its status. */
@@ -110,7 +110,7 @@ class OverlayService : Service() {
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
         val data = getIntentExtra(intent, EXTRA_DATA)
         if (resultCode != Activity.RESULT_OK || data == null) {
-            failStart("Thiếu quyền chụp màn hình.")
+            failStart("Screen capture permission is missing.")
             return
         }
 
@@ -124,7 +124,7 @@ class OverlayService : Service() {
             isCaptureActive = true
             if (intent.getBooleanExtra(EXTRA_SHOW_BUBBLE, false)) showBubble()
         } catch (e: Exception) {
-            failStart("Không khởi tạo được chụp màn hình: ${e.message ?: "unknown error"}")
+            failStart("Could not start screen capture: ${e.message ?: "unknown error"}")
         }
     }
 
@@ -145,7 +145,7 @@ class OverlayService : Service() {
         if (captureJob?.isActive == true) return // ignore taps while a request is running
         val apiKey = Prefs.apiKey(this)
         if (apiKey.isBlank()) {
-            OverlayResult.show(this, "Chưa có Gemini API key. Mở Screen Help để nhập key.")
+            OverlayResult.show(this, "No Gemini API key yet. Open Screen Help to enter one.")
             return
         }
         GeminiClient.warmUp() // TLS handshake overlaps with the capture below
@@ -160,7 +160,7 @@ class OverlayService : Service() {
 
             val bitmap = cap.capture()
             showBubble() // the frame is already taken, so the bubble can come back right away
-            OverlayResult.show(this, "Đang phân tích…")
+            OverlayResult.show(this, "Analyzing…")
 
             val jpeg = withContext(Dispatchers.Default) {
                 bitmap.toJpeg().also { bitmap.recycle() }
@@ -175,8 +175,8 @@ class OverlayService : Service() {
         } catch (e: Exception) {
             val message = when (e) {
                 is GeminiException -> e.message.orEmpty()
-                is IOException -> "Không kết nối được Gemini: ${e.message ?: "unknown error"}"
-                else -> e.message ?: "Có lỗi khi chụp màn hình."
+                is IOException -> "Could not reach Gemini: ${e.message ?: "unknown error"}"
+                else -> e.message ?: "Something went wrong while capturing the screen."
             }
             OverlayResult.show(this, message)
             notifyResult(message)
@@ -298,9 +298,9 @@ class OverlayService : Service() {
         return NotificationCompat.Builder(this, SERVICE_CHANNEL)
             .setSmallIcon(android.R.drawable.ic_menu_help)
             .setContentTitle("Screen Help")
-            .setContentText("Help bubble đang hoạt động")
+            .setContentText("Help bubble is active")
             .setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Tắt", stop)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Turn off", stop)
             .build()
     }
 

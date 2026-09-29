@@ -37,7 +37,7 @@ class MainActivity : AppCompatActivity() {
             val data = result.data
             if (result.resultCode != Activity.RESULT_OK || data == null) {
                 startAfterGrant = false
-                Toast.makeText(this, "Cần cho phép Entire screen để Screen Help hoạt động.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Screen Help needs the Entire screen permission to work.", Toast.LENGTH_LONG).show()
                 refreshStatus()
                 return@registerForActivityResult
             }
@@ -154,7 +154,7 @@ class MainActivity : AppCompatActivity() {
 
 
         val note = TextView(this).apply {
-            text = "Bấm STATUS ở góc trên phải để xem chi tiết. Giữ bong bóng HELP 7 giây để chuyển sang X và tắt Screen Help."
+            text = "Tap STATUS at the top right for details. Hold the HELP bubble for 4 seconds until it turns into X, then tap it to turn Screen Help off."
             textSize = 12f
             setTextColor(Color.rgb(115, 130, 150))
             setPadding(0, dp(18), 0, 0)
@@ -207,12 +207,12 @@ class MainActivity : AppCompatActivity() {
     private fun saveKey() {
         val key = keyInput.text.toString().trim()
         if (key.isBlank()) {
-            keyInput.error = "Nhập Gemini API key"
+            keyInput.error = "Enter your Gemini API key"
             return
         }
         Prefs.saveApiKey(this, key)
         refreshStatus()
-        Toast.makeText(this, "Đã lưu API key", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "API key saved", Toast.LENGTH_SHORT).show()
     }
 
     private fun refreshStatus() {
@@ -240,7 +240,7 @@ class MainActivity : AppCompatActivity() {
         fun mark(ok: Boolean) = if (ok) "✓" else "✗"
         val text = "Gemini API key: ${mark(hasKey())}\nAppear on top: ${mark(hasOverlay())}\n" +
             "Entire screen: ${mark(captureReady())}\nNotifications: ${mark(hasNotify())}\n\n" +
-            "Screen Help chỉ chạy khi các mục cần thiết đã READY."
+            "Screen Help only runs when all required items are READY."
         AlertDialog.Builder(this).setTitle("Screen Help status").setMessage(text).setPositiveButton("OK", null).show()
     }
 
@@ -280,7 +280,7 @@ class MainActivity : AppCompatActivity() {
         if (typed.isNotBlank() && typed != Prefs.apiKey(this)) Prefs.saveApiKey(this, typed)
 
         if (!hasKey()) {
-            keyInput.error = "Nhập Gemini API key trước"
+            keyInput.error = "Enter your Gemini API key first"
             keyInput.requestFocus()
             return
         }
@@ -300,7 +300,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         startService(Intent(this, OverlayService::class.java).setAction(OverlayService.ACTION_SHOW))
-        Toast.makeText(this, "Screen Help đang chạy", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Screen Help is running", Toast.LENGTH_SHORT).show()
         refreshStatus()
     }
 

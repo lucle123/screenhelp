@@ -22,15 +22,20 @@ import kotlin.coroutines.resumeWithException
 class GeminiException(message: String) : IOException(message)
 
 object GeminiClient {
-    private const val MODEL = "gemini-2.5-flash"
+    private const val MODEL = "gemini-3.8-flash"
     private const val HOST = "https://generativelanguage.googleapis.com"
     private const val STREAM_URL = "$HOST/v1beta/models/$MODEL:streamGenerateContent?alt=sse"
 
-    // gemini-2.5-flash "thinks" by default and thinking tokens count against maxOutputTokens.
-    // With the old 2048 limit a long think could leave no room for the visible answer.
-    // 0 = no thinking (fastest), -1 = dynamic, otherwise a token budget (max 24576).
-    private const val THINKING_BUDGET = 1024
-    private const val MAX_OUTPUT_TOKENS = 4096
+    // Gemini 3.x controls reasoning with thinkingLevel (NOT the old 2.5-style thinkingBudget, and the
+    // two must never be sent together). On gemini-3.8-flash the valid levels are "low", "medium"
+    // (default) and "high"; "minimal" returns an error.
+    //   "low"    = fastest, fine for simple questions
+    //   "medium" = balanced, good default for homework problems
+    //   "high"   = slowest, best for hard multi-step math
+    private const val THINKING_LEVEL = "medium"
+
+    // Thinking tokens count against maxOutputTokens, so leave plenty of room for the visible answer.
+    private const val MAX_OUTPUT_TOKENS = 8192
 
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
@@ -44,14 +49,14 @@ object GeminiClient {
         .build()
 
     private val PROMPT = """
-        Bạn là Screen Help AI. Hãy đọc toàn bộ screenshot được gửi.
-        Nếu có bài tập hoặc câu hỏi, hãy giải chính xác từng bước bằng tiếng Việt.
-        Với bài toán, không bỏ qua các phép biến đổi quan trọng.
-        Trình bày ngắn gọn, dễ đọc trên điện thoại.
-        Đánh số Bước 1, Bước 2, ... và cuối cùng ghi rõ: Đáp án: ...
-        Nếu ảnh không có bài tập, nói ngắn gọn nội dung chính nhìn thấy.
-        Không tự bịa nội dung bị khuất hoặc không đọc được.
-        Chỉ dùng văn bản thuần: không Markdown, không LaTeX. Viết công thức bằng ký hiệu thường như x², √, ×, ÷, ≤, ≥, ½.
+        You are Screen Help AI. Read the whole screenshot you are given.
+        If it contains an exercise or a question, solve it accurately, step by step, in English.
+        For math problems, do not skip important transformations.
+        Keep it short and easy to read on a phone.
+        Number the steps as Step 1, Step 2, ... and finish with a clear line: Answer: ...
+        If the image has no exercise, briefly describe the main content you can see.
+        Do not invent content that is hidden or unreadable.
+        Use plain text only: no Markdown, no LaTeX. Write formulas with simple symbols such as x², √, ×, ÷, ≤, ≥, ½.
     """.trimIndent()
 
     private val boldMarks = Regex("""\*\*|__|`""")
@@ -112,12 +117,12 @@ object GeminiClient {
         val parts = JSONArray()
             // Gemini works best with the image first and the text after it.
             .put(
-                JSONObject().put(
-                    "inlineData",
-                    JSONObject().put("mimeType", "image/jpeg").put("data", image)
-                )
+                JSONObject()
+                    .put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", image))
+                    // Recommended by Google for image analysis; helps the model read small text.
+                    .put("mediaResolution", JSONObject().put("level", "media_resolution_high"))
             )
-            .put(JSONObject().put("text", "Đây là ảnh chụp màn hình. Hãy làm theo hướng dẫn."))
+            .put(JSONObject().put("text", "This is a screenshot. Follow the instructions."))
 
         val json = JSONObject()
             .put(
@@ -127,10 +132,11 @@ object GeminiClient {
             .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
             .put(
                 "generationConfig",
+                // No "temperature": Google recommends the default (1.0) for all Gemini 3 models;
+                // lowering it can cause looping or worse results on math and reasoning tasks.
                 JSONObject()
-                    .put("temperature", 0.2)
                     .put("maxOutputTokens", MAX_OUTPUT_TOKENS)
-                    .put("thinkingConfig", JSONObject().put("thinkingBudget", THINKING_BUDGET))
+                    .put("thinkingConfig", JSONObject().put("thinkingLevel", THINKING_LEVEL))
             )
         return json.toString().toRequestBody(JSON_MEDIA)
     }
@@ -139,9 +145,9 @@ object GeminiClient {
         val body = response.body
         if (!response.isSuccessful) {
             val raw = body?.string().orEmpty()
-            throw GeminiException("Gemini API lỗi ${response.code}: ${extractError(raw)}")
+            throw GeminiException("Gemini API error ${response.code}: ${extractError(raw)}")
         }
-        val source = body?.source() ?: throw GeminiException("Gemini không trả về nội dung.")
+        val source = body?.source() ?: throw GeminiException("Gemini returned no content.")
 
         val text = StringBuilder()
         var finishReason: String? = null
@@ -155,7 +161,7 @@ object GeminiClient {
             val chunk = runCatching { JSONObject(payload) }.getOrNull() ?: continue
 
             chunk.optJSONObject("error")?.let {
-                throw GeminiException("Gemini API lỗi: ${it.optString("message")}")
+                throw GeminiException("Gemini API error: ${it.optString("message")}")
             }
             chunk.optJSONObject("promptFeedback")?.optString("blockReason")
                 ?.takeIf { it.isNotBlank() }?.let { blockReason = it }
@@ -174,13 +180,13 @@ object GeminiClient {
         if (result.isEmpty()) {
             throw GeminiException(
                 when {
-                    blockReason != null -> "Gemini từ chối xử lý ảnh này ($blockReason)."
-                    finishReason == "MAX_TOKENS" -> "Gemini hết giới hạn token trước khi trả lời. Hãy thử lại."
-                    else -> "Gemini không trả về nội dung."
+                    blockReason != null -> "Gemini refused to process this image ($blockReason)."
+                    finishReason == "MAX_TOKENS" -> "Gemini hit its token limit before answering. Please try again."
+                    else -> "Gemini returned no content."
                 }
             )
         }
-        return if (finishReason == "MAX_TOKENS") "$result\n\n(Câu trả lời bị cắt do quá dài.)" else result
+        return if (finishReason == "MAX_TOKENS") "$result\n\n(The answer was cut off because it was too long.)" else result
     }
 
     private fun extractText(candidate: JSONObject): String {
