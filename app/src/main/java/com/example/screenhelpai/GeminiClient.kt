@@ -2,6 +2,7 @@ package com.example.screenhelpai
 
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.Call
@@ -19,23 +20,28 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resumeWithException
 
 /** An error message that is already safe/friendly to show to the user. */
-class GeminiException(message: String) : IOException(message)
+class GeminiException(
+    message: String,
+    val httpCode: Int = 0
+) : IOException(message)
 
 object GeminiClient {
-    private const val MODEL = "gemini-3.8-flash"
     private const val HOST = "https://generativelanguage.googleapis.com"
-    private const val STREAM_URL = "$HOST/v1beta/models/$MODEL:streamGenerateContent?alt=sse"
 
-    // Gemini 3.x controls reasoning with thinkingLevel (NOT the old 2.5-style thinkingBudget, and the
-    // two must never be sent together). On gemini-3.8-flash the valid levels are "low", "medium"
-    // (default) and "high"; "minimal" returns an error.
-    //   "low"    = fastest, fine for simple questions
-    //   "medium" = balanced, good default for homework problems
-    //   "high"   = slowest, best for hard multi-step math
-    private const val THINKING_LEVEL = "medium"
+    // HTTP 503 is usually a temporary capacity spike. We retry automatically and then
+    // switch to another current multimodal model instead of showing a raw 503 to the user.
+    // 3.1 Flash-Lite is stable and optimized for cost/throughput; the others are fallbacks.
+    private val MODELS = listOf(
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-3.8-flash"
+    )
 
-    // Thinking tokens count against maxOutputTokens, so leave plenty of room for the visible answer.
+    // Gemini 3.x uses thinkingLevel rather than the old thinkingBudget parameter.
+    private const val THINKING_LEVEL = "low"
     private const val MAX_OUTPUT_TOKENS = 8192
+    private const val MAX_503_RETRIES_PER_MODEL = 2
+    private const val INITIAL_RETRY_DELAY_MS = 1500L
 
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
@@ -87,9 +93,39 @@ object GeminiClient {
      */
     suspend fun solve(apiKey: String, jpeg: ByteArray, onPartial: (String) -> Unit): String {
         val body = withContext(Dispatchers.Default) { buildBody(jpeg) }
+        var last503: GeminiException? = null
+
+        for (model in MODELS) {
+            var attempt = 0
+            while (true) {
+                try {
+                    return solveWithModel(model, apiKey, body, onPartial)
+                } catch (e: GeminiException) {
+                    if (e.httpCode != 503) throw e
+                    last503 = e
+                    if (attempt >= MAX_503_RETRIES_PER_MODEL) break
+
+                    // 1.5s, 3s, ... between attempts.
+                    delay(INITIAL_RETRY_DELAY_MS * (1L shl attempt))
+                    attempt++
+                }
+            }
+        }
+
+        throw last503 ?: GeminiException(
+            "Gemini is temporarily busy. Please try again in a moment."
+        )
+    }
+
+    private suspend fun solveWithModel(
+        model: String,
+        apiKey: String,
+        body: RequestBody,
+        onPartial: (String) -> Unit
+    ): String {
+        val streamUrl = "$HOST/v1beta/models/$model:streamGenerateContent?alt=sse"
         val request = Request.Builder()
-            .url(STREAM_URL)
-            // Header instead of ?key= so the key never ends up in URLs / logs.
+            .url(streamUrl)
             .header("x-goog-api-key", apiKey)
             .post(body)
             .build()
@@ -145,7 +181,10 @@ object GeminiClient {
         val body = response.body
         if (!response.isSuccessful) {
             val raw = body?.string().orEmpty()
-            throw GeminiException("Gemini API error ${response.code}: ${extractError(raw)}")
+            throw GeminiException(
+                "Gemini API error ${response.code}: ${extractError(raw)}",
+                response.code
+            )
         }
         val source = body?.source() ?: throw GeminiException("Gemini returned no content.")
 
