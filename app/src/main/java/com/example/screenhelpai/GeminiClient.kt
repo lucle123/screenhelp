@@ -2,7 +2,6 @@ package com.example.screenhelpai
 
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.Call
@@ -20,28 +19,23 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resumeWithException
 
 /** An error message that is already safe/friendly to show to the user. */
-class GeminiException(
-    message: String,
-    val httpCode: Int = 0
-) : IOException(message)
+class GeminiException(message: String) : IOException(message)
 
 object GeminiClient {
+    private const val MODEL = "gemini-3.8-flash"
     private const val HOST = "https://generativelanguage.googleapis.com"
+    private const val STREAM_URL = "$HOST/v1beta/models/$MODEL:streamGenerateContent?alt=sse"
 
-    // HTTP 503 is usually a temporary capacity spike. We retry automatically and then
-    // switch to another current multimodal model instead of showing a raw 503 to the user.
-    // 3.1 Flash-Lite is stable and optimized for cost/throughput; the others are fallbacks.
-    private val MODELS = listOf(
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash",
-        "gemini-3.8-flash"
-    )
-
-    // Gemini 3.x uses thinkingLevel rather than the old thinkingBudget parameter.
+    // Gemini 3.x controls reasoning with thinkingLevel (NOT the old 2.5-style thinkingBudget, and the
+    // two must never be sent together). On gemini-3.8-flash the valid levels are "low", "medium"
+    // (default) and "high"; "minimal" returns an error.
+    //   "low"    = fastest, fine for simple questions
+    //   "medium" = balanced, good default for homework problems
+    //   "high"   = slowest, best for hard multi-step math
     private const val THINKING_LEVEL = "low"
+
+    // Thinking tokens count against maxOutputTokens, so leave plenty of room for the visible answer.
     private const val MAX_OUTPUT_TOKENS = 8192
-    private const val MAX_503_RETRIES_PER_MODEL = 2
-    private const val INITIAL_RETRY_DELAY_MS = 1500L
 
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
@@ -56,24 +50,47 @@ object GeminiClient {
 
     private val PROMPT = """
         You are Screen Help AI. Read the whole screenshot you are given.
-        If it contains an exercise or a question, solve it accurately, step by step, in English.
-        For math problems, do not skip important transformations.
-        Keep it short and easy to read on a phone.
-        Number the steps as Step 1, Step 2, ... and finish with a clear line: Answer: ...
+        If it contains an exercise or a question, solve it accurately, step by step, in Vietnamese.
+        For math and science problems, do not skip important transformations or reasoning.
+        Keep the explanation concise and easy to read on a phone.
+        Number the steps as Bước 1, Bước 2, ... and finish with a clear line: Đáp án: ...
         If the image has no exercise, briefly describe the main content you can see.
         Do not invent content that is hidden or unreadable.
-        Use plain text only: no Markdown, no LaTeX. Write formulas with simple symbols such as x², √, ×, ÷, ≤, ≥, ½.
+
+        FORMATTING RULES (IMPORTANT):
+        - Use Markdown for headings, bold text, numbered steps, and bullet lists.
+        - Use LaTeX for EVERY mathematical or scientific formula.
+        - Inline formulas MUST use \( ... \).
+        - Important/display formulas MUST use \[ ... \] on their own line.
+        - Fractions: \frac{a}{b}
+        - Square roots: \sqrt{x}
+        - Powers: x^2 or x^{10}
+        - Vectors: \vec{AB}
+        - Angles: \angle A, \theta
+        - Trigonometry: \sin, \cos, \tan
+        - Derivatives: \frac{dy}{dx}, f'(x)
+        - Integrals: \int
+        - Use \boxed{...} for the final important result when appropriate.
+        - NEVER write math formulas as plain ASCII such as x^2 = -b/2a when LaTeX can express them.
+        - Do not put LaTeX inside code blocks.
+        - Do not explain the formatting rules in your answer.
     """.trimIndent()
 
     private val boldMarks = Regex("""\*\*|__|`""")
     private val headings = Regex("""(?m)^#{1,6}\s*""")
     private val starBullets = Regex("""(?m)^\s*\*\s+""")
 
-    /** The result is shown in a plain TextView / notification, so strip leftover Markdown. */
+    /** Plain-text fallback used by notifications. The floating result itself renders Markdown + LaTeX. */
     fun plain(text: String): String = text
+        .replace(Regex("```[\\s\\S]*?```"), "")
+        .replace(Regex("""\\\[(?s:.*?)\\\]"""), { it.value.removePrefix("\\[").removeSuffix("\\]") })
+        .replace(Regex("""\\\((?s:.*?)\\\)"""), { it.value.removePrefix("\\(").removeSuffix("\\)") })
+        .replace(Regex("""\\frac\{([^{}]+)\}\{([^{}]+)\}"""), "$1/$2")
+        .replace(Regex("""\\sqrt\{([^{}]+)\}"""), "√$1")
         .replace(boldMarks, "")
         .replace(headings, "")
         .replace(starBullets, "• ")
+        .replace(Regex("\n{3,}"), "\n\n")
         .trim()
 
     /** Opens the TLS connection in the background so it is ready when the request is sent. */
@@ -93,39 +110,9 @@ object GeminiClient {
      */
     suspend fun solve(apiKey: String, jpeg: ByteArray, onPartial: (String) -> Unit): String {
         val body = withContext(Dispatchers.Default) { buildBody(jpeg) }
-        var last503: GeminiException? = null
-
-        for (model in MODELS) {
-            var attempt = 0
-            while (true) {
-                try {
-                    return solveWithModel(model, apiKey, body, onPartial)
-                } catch (e: GeminiException) {
-                    if (e.httpCode != 503) throw e
-                    last503 = e
-                    if (attempt >= MAX_503_RETRIES_PER_MODEL) break
-
-                    // 1.5s, 3s, ... between attempts.
-                    delay(INITIAL_RETRY_DELAY_MS * (1L shl attempt))
-                    attempt++
-                }
-            }
-        }
-
-        throw last503 ?: GeminiException(
-            "Gemini is temporarily busy. Please try again in a moment."
-        )
-    }
-
-    private suspend fun solveWithModel(
-        model: String,
-        apiKey: String,
-        body: RequestBody,
-        onPartial: (String) -> Unit
-    ): String {
-        val streamUrl = "$HOST/v1beta/models/$model:streamGenerateContent?alt=sse"
         val request = Request.Builder()
-            .url(streamUrl)
+            .url(STREAM_URL)
+            // Header instead of ?key= so the key never ends up in URLs / logs.
             .header("x-goog-api-key", apiKey)
             .post(body)
             .build()
@@ -181,10 +168,7 @@ object GeminiClient {
         val body = response.body
         if (!response.isSuccessful) {
             val raw = body?.string().orEmpty()
-            throw GeminiException(
-                "Gemini API error ${response.code}: ${extractError(raw)}",
-                response.code
-            )
+            throw GeminiException("Gemini API error ${response.code}: ${extractError(raw)}")
         }
         val source = body?.source() ?: throw GeminiException("Gemini returned no content.")
 
