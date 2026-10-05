@@ -75,7 +75,25 @@ object OverlayResult {
             setBackgroundColor(Color.TRANSPARENT)
             isVerticalScrollBarEnabled = true
             isHorizontalScrollBarEnabled = false
-            webViewClient = WebViewClient()
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String?) {
+                    super.onPageFinished(view, url)
+                    // MathJax is loaded asynchronously. Explicitly typeset after the page
+                    // and the MathJax script are ready, so formulas are not left as raw LaTeX.
+                    view.evaluateJavascript(
+                        """
+                        (function waitForMathJax() {
+                            if (window.MathJax && window.MathJax.typesetPromise) {
+                                window.MathJax.typesetPromise().catch(function(e) {});
+                            } else {
+                                setTimeout(waitForMathJax, 150);
+                            }
+                        })();
+                        """.trimIndent(),
+                        null
+                    )
+                }
+            }
         }
         val maxHeight = (metrics.heightPixels * 0.55f).toInt()
         web.layoutParams = LinearLayout.LayoutParams(
@@ -122,6 +140,21 @@ object OverlayResult {
             "UTF-8",
             null
         )
+        // Re-run after a short delay because the MathJax CDN script is async.
+        view.postDelayed({
+            view.evaluateJavascript(
+                """
+                (function waitForMathJax() {
+                    if (window.MathJax && window.MathJax.typesetPromise) {
+                        window.MathJax.typesetPromise().catch(function(e) {});
+                    } else {
+                        setTimeout(waitForMathJax, 150);
+                    }
+                })();
+                """.trimIndent(),
+                null
+            )
+        }, 500L)
         handler.removeCallbacks(dismissRunnable)
         handler.postDelayed(dismissRunnable, AUTO_DISMISS_MS)
     }
